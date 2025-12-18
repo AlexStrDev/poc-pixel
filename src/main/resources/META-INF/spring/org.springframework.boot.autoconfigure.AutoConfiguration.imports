@@ -1,0 +1,3 @@
+io.github.axonkafka.autoconfigure.AxonKafkaAutoConfiguration
+io.github.axonkafka.autoconfigure.KafkaProducerAutoConfiguration
+io.github.axonkafka.autoconfigure.KafkaConsumerAutoConfiguration

@@ -20,6 +20,8 @@ import java.util.stream.Stream;
  * 
  * ESCRITURA: Kafka únicamente (source of truth)
  * LECTURA: PostgreSQL (cache) con lazy-load desde Kafka
+ * 
+ * MEJORA: Detecta cuando PG está vacío y fuerza re-materialización
  */
 @Slf4j
 public class KafkaEventStorageEngine extends JpaEventStorageEngine {
@@ -63,12 +65,26 @@ public class KafkaEventStorageEngine extends JpaEventStorageEngine {
         log.debug("📖 Leyendo eventos: aggregate={}, desde seq={}", 
             aggregateIdentifier, firstSequenceNumber);
         
-        if (materializer.isMaterialized(aggregateIdentifier)) {
-            log.debug("✅ Cache hit: leyendo desde PostgreSQL");
-            return super.readEventData(aggregateIdentifier, firstSequenceNumber);
+        boolean markedAsMaterialized = materializer.isMaterialized(aggregateIdentifier);
+        
+        if (markedAsMaterialized) {
+            log.debug("✅ Cache indica materializado, verificando PG...");
+            
+            Stream<? extends DomainEventData<?>> pgStream = 
+                super.readEventData(aggregateIdentifier, firstSequenceNumber);
+            
+            List<? extends DomainEventData<?>> events = pgStream.toList();
+            
+            if (!events.isEmpty()) {
+                log.debug("✅ Datos encontrados en PG: {} eventos", events.size());
+                return events.stream();
+            }
+            
+            log.warn("⚠️ PG vacío pero cache indica materializado - Forzando re-materialización");
+            materializer.removeMaterializedMark(aggregateIdentifier);
         }
         
-        log.info("⚠️ Cache miss: materializando desde Kafka...");
+        log.info("🔄 Materializando desde Kafka...");
         
         String lockKey = "materialize:" + aggregateIdentifier;
         
@@ -78,7 +94,7 @@ public class KafkaEventStorageEngine extends JpaEventStorageEngine {
                 30, 
                 TimeUnit.SECONDS,
                 () -> {
-                    if (!materializer.isMaterialized(aggregateIdentifier)) {
+                    if (!hasEventsInPostgreSQL(aggregateIdentifier)) {
                         log.info("🔄 Materializando aggregate: {}", aggregateIdentifier);
                         materializer.materializeFromKafka(aggregateIdentifier);
                         log.info("✅ Aggregate materializado: {}", aggregateIdentifier);
@@ -92,12 +108,22 @@ public class KafkaEventStorageEngine extends JpaEventStorageEngine {
                 log.warn("⚠️ Timeout adquiriendo lock: {}", aggregateIdentifier);
                 throw new RuntimeException("Timeout materializando aggregate");
             }
-            
             return super.readEventData(aggregateIdentifier, firstSequenceNumber);
-            
         } catch (Exception e) {
             log.error("💥 Error materializando aggregate", e);
             throw new RuntimeException("No se pudo reconstruir aggregate", e);
+        }
+    }
+
+    private boolean hasEventsInPostgreSQL(String aggregateIdentifier) {
+        try {
+            Stream<? extends DomainEventData<?>> stream = 
+                super.readEventData(aggregateIdentifier, 0);
+            return stream.findFirst().isPresent();
+            
+        } catch (Exception e) {
+            log.warn("Error verificando eventos en PG: {}", e.getMessage());
+            return false;
         }
     }
 

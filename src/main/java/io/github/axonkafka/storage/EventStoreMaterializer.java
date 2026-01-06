@@ -21,10 +21,10 @@ import java.util.concurrent.ConcurrentHashMap;
  * Materializa eventos desde Kafka a PostgreSQL de forma optimizada.
  * 
  * MEJORAS:
- * - Detección temprana de fin de topic (no esperar timeout completo)
- * - Timeout adaptativo basado en contexto
- * - Mejor manejo de particiones vacías
- * - Métricas de rendimiento
+ * - Detección temprana de fin de topic
+ * - Timeout adaptativo
+ * - Mejor manejo de cache
+ * - Método para limpiar marcas de materialización
  */
 @Slf4j
 public class EventStoreMaterializer {
@@ -37,7 +37,7 @@ public class EventStoreMaterializer {
     private final Set<String> materializedCache;
     private final Queue<KafkaConsumer<String, String>> consumerPool;
     
-    // Métricas de rendimiento
+    // Métricas
     private long totalMaterializationTimeMs = 0;
     private int materializationCount = 0;
 
@@ -55,12 +55,19 @@ public class EventStoreMaterializer {
         this.consumerPool = new LinkedList<>();
     }
 
+    /**
+     * Verifica si un aggregate está materializado.
+     * 
+     * MEJORA: Solo confía en cache si efectivamente hay datos en PG
+     */
     public boolean isMaterialized(String aggregateIdentifier) {
+        // Verificar cache primero
         if (materializedCache.contains(aggregateIdentifier)) {
             log.debug("✅ Cache hit: {}", aggregateIdentifier);
             return true;
         }
         
+        // Verificar en PostgreSQL
         EntityManager em = entityManagerProvider.getEntityManager();
         
         try {
@@ -86,9 +93,22 @@ public class EventStoreMaterializer {
         }
     }
 
+    /**
+     * NUEVO: Marca un aggregate como materializado
+     */
     public void markAsMaterialized(String aggregateIdentifier) {
         materializedCache.add(aggregateIdentifier);
         log.debug("✅ Marcado como materializado: {}", aggregateIdentifier);
+    }
+
+    /**
+     * NUEVO: Elimina la marca de materialización (útil cuando se detecta que PG está vacío)
+     */
+    public void removeMaterializedMark(String aggregateIdentifier) {
+        boolean removed = materializedCache.remove(aggregateIdentifier);
+        if (removed) {
+            log.info("🗑️ Marca de materialización eliminada: {}", aggregateIdentifier);
+        }
     }
 
     /**
@@ -114,7 +134,7 @@ public class EventStoreMaterializer {
             consumer.assign(partitions);
             consumer.seekToBeginning(partitions);
             
-            // Obtener offsets finales de cada partición
+            // Obtener offsets finales
             Map<TopicPartition, Long> endOffsets = consumer.endOffsets(partitions);
             log.debug("📊 End offsets: {}", endOffsets);
             
@@ -123,7 +143,7 @@ public class EventStoreMaterializer {
             long timeoutMillis = calculateTimeout(found);
             long lastEventSeq = -1;
             int emptyPollsInARow = 0;
-            int maxEmptyPolls = 3; // Salir después de 3 polls vacíos consecutivos
+            int maxEmptyPolls = 3;
             
             while (System.currentTimeMillis() - startTime < timeoutMillis) {
                 ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(500));
@@ -131,29 +151,22 @@ public class EventStoreMaterializer {
                 if (records.isEmpty()) {
                     emptyPollsInARow++;
                     
-                    // MEJORA 1: Detección temprana de fin de topic
+                    // Detección temprana de fin de topic
                     if (hasReachedEnd(consumer, partitions, endOffsets)) {
-                        log.debug("🏁 Fin de topic alcanzado, saliendo...");
+                        log.debug("🏁 Fin de topic alcanzado");
                         break;
                     }
                     
-                    // MEJORA 2: Salir si ya encontramos eventos y no hay más datos
-                    if (found) {
+                    // Salir si ya encontramos eventos
+                    if (found && emptyPollsInARow >= maxEmptyPolls) {
                         log.debug("✅ Eventos encontrados y no hay más datos");
-                        break;
-                    }
-                    
-                    // MEJORA 3: Salir temprano si múltiples polls vacíos y no se encontró nada
-                    if (emptyPollsInARow >= maxEmptyPolls && !found) {
-                        log.debug("⏭️ {} polls vacíos consecutivos sin encontrar eventos, saliendo...", 
-                            emptyPollsInARow);
                         break;
                     }
                     
                     continue;
                 }
                 
-                emptyPollsInARow = 0; // Reset contador
+                emptyPollsInARow = 0;
                 
                 for (ConsumerRecord<String, String> record : records) {
                     if (aggregateIdentifier.equals(record.key())) {
@@ -165,7 +178,7 @@ public class EventStoreMaterializer {
                             
                             log.debug("📥 Evento #{} encontrado", event.getSequenceNumber());
                             
-                            // MEJORA 4: Ajustar timeout si se encontraron eventos
+                            // Ajustar timeout
                             if (events.size() == 1) {
                                 timeoutMillis = calculateTimeout(true);
                             }
@@ -185,7 +198,7 @@ public class EventStoreMaterializer {
                 return;
             }
             
-            // Ordenar y persistir eventos
+            // Ordenar y persistir
             events.sort(Comparator.comparingLong(DomainEventMessage::getSequenceNumber));
             
             log.info("📦 Persistiendo {} eventos (seq: 0-{}) - Búsqueda: {}ms", 
@@ -213,7 +226,7 @@ public class EventStoreMaterializer {
     }
     
     /**
-     * MEJORA: Detecta si el consumer ha alcanzado el final del topic en todas las particiones.
+     * Detecta si el consumer ha alcanzado el final del topic
      */
     private boolean hasReachedEnd(
             KafkaConsumer<String, String> consumer,
@@ -226,12 +239,9 @@ public class EventStoreMaterializer {
                 Long endOffset = endOffsets.get(partition);
                 
                 if (endOffset != null && currentPosition < endOffset) {
-                    // Aún hay mensajes por leer en esta partición
                     return false;
                 }
             }
-            
-            // Todas las particiones alcanzaron el final
             return true;
             
         } catch (Exception e) {
@@ -241,24 +251,19 @@ public class EventStoreMaterializer {
     }
     
     /**
-     * MEJORA: Calcula timeout adaptativo basado en el contexto.
-     * 
-     * - Si NO se encontraron eventos: timeout corto (2s)
-     * - Si SÍ se encontraron eventos: timeout más largo (5s) para leer todos
+     * Calcula timeout adaptativo
      */
     private long calculateTimeout(boolean found) {
         if (found) {
-            // Si ya encontramos eventos, dar más tiempo para leer el resto
-            return 5000; // 5 segundos
+            return 5000; // 5 segundos si ya encontró eventos
         } else {
-            // Si no hay eventos, usar timeout corto
             long configuredTimeout = properties.getMaterializer().getTimeoutSeconds() * 1000;
-            return Math.min(configuredTimeout, 2000); // Máximo 2 segundos
+            return Math.min(configuredTimeout, 2000); // Máximo 2 segundos inicialmente
         }
     }
     
     /**
-     * Persiste eventos en lotes.
+     * Persiste eventos en lotes
      */
     private void persistEvents(EntityManager em, List<DomainEventMessage<?>> events) {
         int batchSize = 50;
@@ -266,6 +271,7 @@ public class EventStoreMaterializer {
         for (int i = 0; i < events.size(); i++) {
             DomainEventMessage<?> event = events.get(i);
             
+            // Verificar idempotencia
             Long count = em.createQuery(
                 "SELECT COUNT(e) FROM DomainEventEntry e " +
                 "WHERE e.aggregateIdentifier = :aggId AND e.sequenceNumber = :seq",
@@ -289,9 +295,6 @@ public class EventStoreMaterializer {
         em.flush();
     }
     
-    /**
-     * Actualiza métricas de rendimiento.
-     */
     private void updateMetrics(long timeMs) {
         synchronized (this) {
             totalMaterializationTimeMs += timeMs;
@@ -355,7 +358,7 @@ public class EventStoreMaterializer {
 
     public void clearCache() {
         materializedCache.clear();
-        log.info("🗑️ Cache limpiado");
+        log.info("🗑️ Cache limpiado completamente");
     }
 
     public void shutdown() {

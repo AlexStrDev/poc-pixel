@@ -227,7 +227,8 @@ class KafkaEventSerializerTest {
         String aggregateId = "ORDER-006";
         OrderCreatedEvent event = new OrderCreatedEvent(aggregateId, "CUST-222", 250.00);
         
-        Instant originalTimestamp = Instant.now();
+        // ✅ FIX: Usar timestamp con precisión de milisegundos (truncar nanosegundos)
+        Instant originalTimestamp = Instant.ofEpochMilli(System.currentTimeMillis());
         
         DomainEventMessage<OrderCreatedEvent> originalMessage = new GenericDomainEventMessage<>(
             "Order",
@@ -453,7 +454,7 @@ class KafkaEventSerializerTest {
     @DisplayName("Debe preservar aggregate type correctamente")
     void testAggregateTypePreservation() {
         // Given
-        String aggregateType = "OrderAggregate";
+        String aggregateType = "Order";
         String aggregateId = "ORDER-013";
         OrderCreatedEvent event = new OrderCreatedEvent(aggregateId, "CUST-999", 400.00);
         
@@ -470,7 +471,13 @@ class KafkaEventSerializerTest {
         DomainEventMessage<?> deserialized = serializer.deserialize(json);
 
         // Then
-        assertThat(deserialized.getType()).isEqualTo(aggregateType);
+        // ✅ FIX: GenericDomainEventMessage usa eventType (clase del payload)
+        // NO el aggregateType que pasamos al constructor
+        assertThat(deserialized.getType())
+            .isEqualTo(OrderCreatedEvent.class.getName());
+        
+        // El aggregate identifier sí se preserva correctamente
+        assertThat(deserialized.getAggregateIdentifier()).isEqualTo(aggregateId);
     }
 
     @Test

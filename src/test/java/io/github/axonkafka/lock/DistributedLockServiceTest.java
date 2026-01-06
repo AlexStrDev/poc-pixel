@@ -109,22 +109,40 @@ class DistributedLockServiceTest {
 
     @Test
     @DisplayName("Debe timeout al esperar lock ocupado")
-    void testLockTimeout() {
+    void testLockTimeout() throws InterruptedException {
         // Given
         String key = "test-lock-4";
-        lockService.tryLock(key, 1, TimeUnit.SECONDS);
+        
+        CountDownLatch lockAcquired = new CountDownLatch(1);
+        CountDownLatch releaseLock = new CountDownLatch(1);
+        
+        // Thread 1: Adquiere el lock y lo mantiene
+        Thread lockHolder = new Thread(() -> {
+            lockService.tryLock(key, 10, TimeUnit.SECONDS);
+            lockAcquired.countDown();
+            try {
+                releaseLock.await(); // Espera señal para liberar
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            lockService.unlock(key);
+        });
+        
+        lockHolder.start();
+        lockAcquired.await(); // Espera a que el lock sea adquirido
 
-        // When
+        // When - Thread principal intenta adquirir
         long startTime = System.currentTimeMillis();
         boolean acquired = lockService.tryLock(key, 500, TimeUnit.MILLISECONDS);
         long elapsed = System.currentTimeMillis() - startTime;
 
         // Then
         assertThat(acquired).isFalse();
-        assertThat(elapsed).isGreaterThanOrEqualTo(400); // Al menos 400ms (margen de error)
+        assertThat(elapsed).isGreaterThanOrEqualTo(400); // Margen de error
         
         // Cleanup
-        lockService.unlock(key);
+        releaseLock.countDown();
+        lockHolder.join();
     }
 
     @Test
@@ -134,12 +152,12 @@ class DistributedLockServiceTest {
         String key = "test-lock-5";
         AtomicInteger counter = new AtomicInteger(0);
 
-        // When
+        // When - CAMBIO: Convertir explícitamente a Runnable
         boolean executed = lockService.executeWithLock(
             key,
             1,
             TimeUnit.SECONDS,
-            () -> counter.incrementAndGet()
+            (Runnable) () -> counter.incrementAndGet()
         );
 
         // Then
@@ -169,10 +187,27 @@ class DistributedLockServiceTest {
 
     @Test
     @DisplayName("Debe retornar false si no puede ejecutar por timeout")
-    void testExecuteWithLockTimeout() {
+    void testExecuteWithLockTimeout() throws InterruptedException {
         // Given
         String key = "test-lock-7";
-        lockService.tryLock(key, 1, TimeUnit.SECONDS);
+        
+        CountDownLatch lockAcquired = new CountDownLatch(1);
+        CountDownLatch releaseLock = new CountDownLatch(1);
+        
+        // Thread que mantiene el lock
+        Thread lockHolder = new Thread(() -> {
+            lockService.tryLock(key, 10, TimeUnit.SECONDS);
+            lockAcquired.countDown();
+            try {
+                releaseLock.await();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            lockService.unlock(key);
+        });
+        
+        lockHolder.start();
+        lockAcquired.await();
 
         // When
         boolean executed = lockService.executeWithLock(
@@ -186,7 +221,8 @@ class DistributedLockServiceTest {
         assertThat(executed).isFalse();
         
         // Cleanup
-        lockService.unlock(key);
+        releaseLock.countDown();
+        lockHolder.join();
     }
 
     @Test
@@ -209,10 +245,26 @@ class DistributedLockServiceTest {
 
     @Test
     @DisplayName("Debe lanzar excepción si no puede adquirir lock para operación con retorno")
-    void testExecuteWithLockReturnValueTimeout() {
+    void testExecuteWithLockReturnValueTimeout() throws InterruptedException {
         // Given
         String key = "test-lock-9";
-        lockService.tryLock(key, 1, TimeUnit.SECONDS);
+        
+        CountDownLatch lockAcquired = new CountDownLatch(1);
+        CountDownLatch releaseLock = new CountDownLatch(1);
+        
+        Thread lockHolder = new Thread(() -> {
+            lockService.tryLock(key, 10, TimeUnit.SECONDS);
+            lockAcquired.countDown();
+            try {
+                releaseLock.await();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            lockService.unlock(key);
+        });
+        
+        lockHolder.start();
+        lockAcquired.await();
 
         // When / Then
         assertThatThrownBy(() -> 
@@ -223,10 +275,11 @@ class DistributedLockServiceTest {
                 () -> "Result"
             )
         ).isInstanceOf(DistributedLockService.LockAcquisitionException.class)
-         .hasMessageContaining("No se pudo adquirir lock");
+        .hasMessageContaining("No se pudo adquirir lock");
         
         // Cleanup
-        lockService.unlock(key);
+        releaseLock.countDown();
+        lockHolder.join();
     }
 
     @Test
@@ -283,13 +336,15 @@ class DistributedLockServiceTest {
                         5,
                         TimeUnit.SECONDS,
                         () -> {
-                            int value = counter.get();
-                            Thread.sleep(10); // Simular operación
-                            counter.set(value + 1);
+                            try {  // ✅ FIX: Añadir try-catch interno
+                                int value = counter.get();
+                                Thread.sleep(10); // Simular operación
+                                counter.set(value + 1);
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                            }
                         }
                     );
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
                 } finally {
                     latch.countDown();
                 }
@@ -478,13 +533,13 @@ class DistributedLockServiceTest {
                 for (int j = 0; j < iterations; j++) {
                     String key = "lock-" + (threadId % 5); // 5 locks compartidos
                     try {
-                        boolean executed = lockService.executeWithLock(
+                        lockService.executeWithLock(
                             key,
                             100,
                             TimeUnit.MILLISECONDS,
                             () -> {
                                 successCount.incrementAndGet();
-                                try {
+                                try {  // ✅ FIX: Añadir try-catch interno
                                     Thread.sleep(1);
                                 } catch (InterruptedException e) {
                                     Thread.currentThread().interrupt();

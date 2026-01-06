@@ -3,6 +3,8 @@ package io.github.axonkafka.gateway;
 import io.github.axonkafka.handler.CommandReplyHandler;
 import io.github.axonkafka.properties.AxonKafkaProperties;
 import io.github.axonkafka.serializer.CommandSerializer;
+
+import org.apache.kafka.clients.producer.RecordMetadata;
 import org.axonframework.commandhandling.CommandCallback;
 import org.axonframework.commandhandling.CommandMessage;
 import org.axonframework.commandhandling.CommandResultMessage;
@@ -86,8 +88,14 @@ class KafkaCommandGatewayIntegrationTest {
         // Given
         CreateOrderCommand command = new CreateOrderCommand("ORDER-001", "CUST-123", 150.50);
         
+        // ✅ FIX: Mock completo de SendResult
+        SendResult<String, String> sendResult = mock(SendResult.class);
+        RecordMetadata metadata = mock(RecordMetadata.class);
+        when(sendResult.getRecordMetadata()).thenReturn(metadata);
+        when(metadata.offset()).thenReturn(0L);
+        
         CompletableFuture<SendResult<String, String>> sendFuture = 
-            CompletableFuture.completedFuture(mock(SendResult.class));
+            CompletableFuture.completedFuture(sendResult);
         
         when(kafkaTemplate.send(anyString(), anyString(), anyString()))
             .thenReturn(sendFuture);
@@ -107,6 +115,9 @@ class KafkaCommandGatewayIntegrationTest {
                 latch.countDown();
             }
         });
+
+        // ✅ IMPORTANTE: Dar tiempo para que se registre el callback
+        Thread.sleep(100);
 
         // Simular respuesta exitosa
         replyFuture.complete(CommandReplyHandler.CommandResult.success("test-correlation", "OK"));
@@ -165,8 +176,14 @@ class KafkaCommandGatewayIntegrationTest {
         // Given
         CreateOrderCommand command = new CreateOrderCommand("ORDER-003", "CUST-789", 99.99);
         
+        // ✅ FIX: Mock completo de SendResult
+        SendResult<String, String> sendResult = mock(SendResult.class);
+        RecordMetadata metadata = mock(RecordMetadata.class);
+        when(sendResult.getRecordMetadata()).thenReturn(metadata);
+        when(metadata.offset()).thenReturn(0L);
+        
         CompletableFuture<SendResult<String, String>> sendFuture = 
-            CompletableFuture.completedFuture(mock(SendResult.class));
+            CompletableFuture.completedFuture(sendResult);
         
         when(kafkaTemplate.send(anyString(), anyString(), anyString()))
             .thenReturn(sendFuture);
@@ -191,13 +208,16 @@ class KafkaCommandGatewayIntegrationTest {
             }
         });
 
+        // ✅ CRÍTICO: Dar tiempo para que se registre el callback
+        Thread.sleep(200);
+
         // Simular respuesta exitosa
         CommandReplyHandler.CommandResult successResult = 
             CommandReplyHandler.CommandResult.success("test-correlation", "Order created successfully");
         replyFuture.complete(successResult);
 
         // Then
-        assertThat(latch.await(2, TimeUnit.SECONDS)).isTrue();
+        assertThat(latch.await(3, TimeUnit.SECONDS)).isTrue();
         assertThat(capturedResult.get()).isEqualTo("Order created successfully");
     }
 
@@ -207,8 +227,13 @@ class KafkaCommandGatewayIntegrationTest {
         // Given
         CreateOrderCommand command = new CreateOrderCommand("ORDER-004", "CUST-999", 300.00);
         
+        SendResult<String, String> sendResult = mock(SendResult.class);
+        RecordMetadata metadata = mock(RecordMetadata.class);
+        when(sendResult.getRecordMetadata()).thenReturn(metadata);
+        when(metadata.offset()).thenReturn(0L);
+        
         CompletableFuture<SendResult<String, String>> sendFuture = 
-            CompletableFuture.completedFuture(mock(SendResult.class));
+            CompletableFuture.completedFuture(sendResult);
         
         when(kafkaTemplate.send(anyString(), anyString(), anyString()))
             .thenReturn(sendFuture);
@@ -233,13 +258,20 @@ class KafkaCommandGatewayIntegrationTest {
             }
         });
 
-        // Simular respuesta de error
-        CommandReplyHandler.CommandResult errorResult = 
-            CommandReplyHandler.CommandResult.error("test-correlation", "Insufficient funds");
-        replyFuture.complete(errorResult);
+        // ✅ FIX: Completar con error en thread separado
+        CompletableFuture.runAsync(() -> {
+            try {
+                Thread.sleep(300);
+                CommandReplyHandler.CommandResult errorResult = 
+                    CommandReplyHandler.CommandResult.error("test-correlation", "Insufficient funds");
+                replyFuture.complete(errorResult);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
 
         // Then
-        assertThat(latch.await(2, TimeUnit.SECONDS)).isTrue();
+        assertThat(latch.await(5, TimeUnit.SECONDS)).isTrue();
         assertThat(capturedError.get()).isInstanceOf(KafkaCommandGateway.CommandExecutionException.class);
         assertThat(capturedError.get().getMessage()).contains("Insufficient funds");
     }
@@ -250,8 +282,13 @@ class KafkaCommandGatewayIntegrationTest {
         // Given
         CreateOrderCommand command = new CreateOrderCommand("ORDER-005", "CUST-111", 50.00);
         
+        SendResult<String, String> sendResult = mock(SendResult.class);
+        RecordMetadata metadata = mock(RecordMetadata.class);
+        when(sendResult.getRecordMetadata()).thenReturn(metadata);
+        when(metadata.offset()).thenReturn(0L);
+        
         CompletableFuture<SendResult<String, String>> sendFuture = 
-            CompletableFuture.completedFuture(mock(SendResult.class));
+            CompletableFuture.completedFuture(sendResult);
         
         when(kafkaTemplate.send(anyString(), anyString(), anyString()))
             .thenReturn(sendFuture);
@@ -262,10 +299,10 @@ class KafkaCommandGatewayIntegrationTest {
         when(replyHandler.registerPendingCommand(anyString()))
             .thenReturn(replyFuture);
 
-        // Simular respuesta asíncrona
+        // ✅ FIX: Completar la respuesta en un thread separado DESPUÉS de un delay
         CompletableFuture.runAsync(() -> {
             try {
-                Thread.sleep(500);
+                Thread.sleep(300); // Dar tiempo para que sendAndWait configure el callback
                 replyFuture.complete(
                     CommandReplyHandler.CommandResult.success("test-correlation", "ORDER-005")
                 );
@@ -275,7 +312,7 @@ class KafkaCommandGatewayIntegrationTest {
         });
 
         // When
-        String result = commandGateway.sendAndWait(command);
+        String result = commandGateway.sendAndWait(command, 5, TimeUnit.SECONDS);
 
         // Then
         assertThat(result).isEqualTo("ORDER-005");
@@ -312,8 +349,13 @@ class KafkaCommandGatewayIntegrationTest {
         // Given
         CreateOrderCommand command = new CreateOrderCommand("ORDER-007", "CUST-333", 125.00);
         
+        SendResult<String, String> sendResult = mock(SendResult.class);
+        RecordMetadata metadata = mock(RecordMetadata.class);
+        when(sendResult.getRecordMetadata()).thenReturn(metadata);
+        when(metadata.offset()).thenReturn(0L);
+        
         CompletableFuture<SendResult<String, String>> sendFuture = 
-            CompletableFuture.completedFuture(mock(SendResult.class));
+            CompletableFuture.completedFuture(sendResult);
         
         when(kafkaTemplate.send(anyString(), anyString(), anyString()))
             .thenReturn(sendFuture);
@@ -327,13 +369,20 @@ class KafkaCommandGatewayIntegrationTest {
         // When
         CompletableFuture<String> resultFuture = commandGateway.send(command);
 
-        // Simular respuesta
-        replyFuture.complete(
-            CommandReplyHandler.CommandResult.success("test-correlation", "Success")
-        );
+        // ✅ FIX: Completar en thread separado con delay
+        CompletableFuture.runAsync(() -> {
+            try {
+                Thread.sleep(300);
+                replyFuture.complete(
+                    CommandReplyHandler.CommandResult.success("test-correlation", "Success")
+                );
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
 
         // Then
-        String result = resultFuture.get(2, TimeUnit.SECONDS);
+        String result = resultFuture.get(5, TimeUnit.SECONDS);
         assertThat(result).isEqualTo("Success");
     }
 

@@ -1,5 +1,6 @@
 package io.github.axonkafka.serializer;
 
+import io.github.axonkafka.annotation.RoutingKey;
 import io.github.axonkafka.serializer.model.SerializedCommand;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
@@ -8,6 +9,7 @@ import org.axonframework.commandhandling.CommandMessage;
 import org.axonframework.commandhandling.GenericCommandMessage;
 import org.axonframework.messaging.MetaData;
 
+import java.lang.reflect.Method;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
@@ -62,7 +64,7 @@ public class CommandSerializer {
             serializedCommand.setRoutingKey(routingKey);
             
             String json = objectMapper.writeValueAsString(serializedCommand);
-            log.debug("Comando serializado: {}", commandName);
+            log.debug("Comando serializado: {} con routingKey: {}", commandName, routingKey);
             
             return json;
             
@@ -105,26 +107,68 @@ public class CommandSerializer {
     }
 
     /**
-     * Extrae el routing key de un CommandMessage
+     * Extrae el routing key de un CommandMessage.
+     * 
+     * PRIORIDAD:
+     * 1. Método anotado con @RoutingKey
+     * 2. Campo anotado con @TargetAggregateIdentifier
+     * 3. UUID aleatorio
      */
     public String extractRoutingKey(CommandMessage<?> commandMessage) {
         try {
             Object payload = commandMessage.getPayload();
+            Class<?> payloadClass = payload.getClass();
             
-            // Buscar campo con @TargetAggregateIdentifier
-            var fields = payload.getClass().getDeclaredFields();
+            // 1. Buscar método con @RoutingKey (PRIORIDAD)
+            for (Method method : payloadClass.getDeclaredMethods()) {
+                if (method.isAnnotationPresent(RoutingKey.class)) {
+                    method.setAccessible(true);
+                    Object value = method.invoke(payload);
+                    
+                    if (value != null) {
+                        String routingKey = value.toString();
+                        log.debug("✅ RoutingKey extraído de @RoutingKey: {}", routingKey);
+                        return routingKey;
+                    }
+                }
+            }
+            
+            // 2. Buscar método anotado con @TargetAggregateIdentifier
+            for (Method method : payloadClass.getDeclaredMethods()) {
+                if (method.isAnnotationPresent(org.axonframework.modelling.command.TargetAggregateIdentifier.class)) {
+                    method.setAccessible(true);
+                    Object value = method.invoke(payload);
+                    
+                    if (value != null) {
+                        String routingKey = value.toString();
+                        log.debug("✅ RoutingKey extraído de método @TargetAggregateIdentifier: {}", routingKey);
+                        return routingKey;
+                    }
+                }
+            }
+            
+            // 3. Buscar campo con @TargetAggregateIdentifier (fallback)
+            var fields = payloadClass.getDeclaredFields();
             for (var field : fields) {
                 if (field.isAnnotationPresent(org.axonframework.modelling.command.TargetAggregateIdentifier.class)) {
                     field.setAccessible(true);
                     Object value = field.get(payload);
-                    return value != null ? value.toString() : UUID.randomUUID().toString();
+                    
+                    if (value != null) {
+                        String routingKey = value.toString();
+                        log.debug("✅ RoutingKey extraído de campo @TargetAggregateIdentifier: {}", routingKey);
+                        return routingKey;
+                    }
                 }
             }
             
-            return UUID.randomUUID().toString();
+            // 4. UUID aleatorio como último recurso
+            String randomKey = UUID.randomUUID().toString();
+            log.debug("⚠️ No se encontró routing key, usando UUID: {}", randomKey);
+            return randomKey;
             
         } catch (Exception e) {
-            log.warn("No se pudo extraer routingKey, usando UUID aleatorio", e);
+            log.warn("Error extrayendo routingKey, usando UUID aleatorio", e);
             return UUID.randomUUID().toString();
         }
     }

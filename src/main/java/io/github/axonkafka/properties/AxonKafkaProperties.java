@@ -11,6 +11,8 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * axon.kafka.bootstrap-servers=localhost:9092
  * axon.kafka.command.topic=my-app-commands
  * axon.kafka.event.topic=my-app-events
+ * axon.kafka.topic.partitions=100
+ * axon.kafka.topic.auto-correct-partitions=true
  */
 @Data
 @ConfigurationProperties(prefix = "axon.kafka")
@@ -144,6 +146,15 @@ public class AxonKafkaProperties {
          * Crear topics automáticamente si no existen
          */
         private boolean autoCreate = true;
+
+        /**
+         * Auto-corregir particiones si hay mismatch
+         * Si está habilitado, incrementará automáticamente las particiones
+         * de topics existentes que tengan menos particiones de las configuradas.
+         * 
+         * IMPORTANTE: Solo puede incrementar particiones, no reducirlas.
+         */
+        private boolean autoCorrectPartitions = true;
 
         /**
          * Número de particiones para topics
